@@ -1,0 +1,11 @@
+const r = require('express').Router();
+const c = require('../controllers/productController');
+const { protect, restrictTo } = require('../middleware/auth');
+r.get('/', c.getAll);
+r.get('/:id', c.getOne);
+r.use(protect, restrictTo('admin', 'manager'));
+r.post('/', c.create);
+r.patch('/:id', c.update);
+r.delete('/:id', c.remove);
+r.post('/bulk-delete', c.bulkDelete);
+module.exports = r;

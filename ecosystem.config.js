@@ -1,0 +1,23 @@
+module.exports = {
+  apps: [
+    {
+      name: 'marketplace-api',
+      script: 'server.js',
+      instances: 'max', // or number of CPUs
+      exec_mode: 'cluster',
+      env: {
+        NODE_ENV: 'production',
+        PORT: 5000,
+      },
+      env_development: {
+        NODE_ENV: 'development',
+        PORT: 5000,
+      },
+      max_memory_restart: '500M',
+      error_file: './logs/err.log',
+      out_file: './logs/out.log',
+      merge_logs: true,
+      time: true,
+    },
+  ],
+};
