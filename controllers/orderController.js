@@ -11,6 +11,9 @@ const {
   Notification,
   sequelize,
   ProductVariant,
+  VariantAttributeValue,
+  Attribute,
+  AttributeOption,
 } = require("../models");
 
 const AppError = require("../utils/appError");
@@ -19,7 +22,6 @@ const { v4: uuidv4 } = require("uuid");
 
 const genNo = () => {
   const d = new Date();
-
   return `ORD${d.getFullYear().toString().slice(-2)}${String(
     d.getMonth() + 1,
   ).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}${Math.floor(
@@ -31,6 +33,10 @@ const toNumber = (value) => {
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
 };
+
+/** Money helpers – work in integer cents to avoid floating-point errors */
+const toCents = (value) => Math.round(toNumber(value) * 100);
+const fromCents = (cents) => Number((toNumber(cents) / 100).toFixed(2));
 
 const getVariantId = (item) => {
   return item.variant_id || item.selected_attributes?.variant_id || null;
@@ -47,17 +53,8 @@ const getProductName = (product) => {
   );
 };
 
-const getVariantStockField = (variant) => {
-  const attributes = variant.constructor.rawAttributes || {};
-
-  return ["quantity", "stock", "stock_quantity"].find(
-    (field) => attributes[field],
-  );
-};
-
 const getVariantPrice = (variant, product) => {
   const variantPrice = variant?.price;
-
   if (
     variantPrice !== undefined &&
     variantPrice !== null &&
@@ -65,13 +62,66 @@ const getVariantPrice = (variant, product) => {
   ) {
     return toNumber(variantPrice);
   }
-
   return toNumber(product.price);
 };
 
 const getVariantSku = (variant, product) => {
   return variant?.sku || variant?.variant_sku || product?.sku || null;
 };
+
+/**
+ * Build a durable, human-readable snapshot of the chosen variant attributes.
+ * Stored on OrderItem so admin/history still shows the correct size/color
+ * even if the catalog later changes.
+ */
+function buildVariantSnapshot(variant, cartItem) {
+  // Prefer labels the frontend already sent (readable strings).
+  const fromCart = cartItem?.selected_attributes;
+  if (
+    fromCart &&
+    typeof fromCart === "object" &&
+    Object.keys(fromCart).length
+  ) {
+    const snap = { ...fromCart };
+    if (variant?.id && !snap.variant_id) snap.variant_id = variant.id;
+    return snap;
+  }
+
+  const snapshot = {};
+  if (variant?.id) snapshot.variant_id = variant.id;
+
+  const entries =
+    variant?.attributeValues || variant?.attributes || variant?.options || [];
+
+  for (const entry of entries) {
+    const code =
+      entry?.attribute?.code ||
+      entry?.definition?.code ||
+      entry?.code ||
+      entry?.attribute_code ||
+      entry?.attribute?.slug;
+
+    if (!code) continue;
+
+    const label =
+      entry?.option?.translations?.en?.name ||
+      entry?.option?.translations?.ru?.name ||
+      entry?.option?.translations?.tm?.name ||
+      entry?.option?.name ||
+      entry?.option?.label ||
+      entry?.option?.value ||
+      entry?.value_text ||
+      entry?.display ||
+      entry?.value ||
+      null;
+
+    if (label !== null && label !== undefined && label !== "") {
+      snapshot[code] = String(label);
+    }
+  }
+
+  return snapshot;
+}
 
 exports.checkout = catchAsync(async (req, res, next) => {
   const userId = req.user.id;
@@ -137,7 +187,6 @@ exports.checkout = catchAsync(async (req, res, next) => {
           // ------------------------------------------
           // Variant product
           // ------------------------------------------
-
           variant = await ProductVariant.findByPk(variantId, {
             transaction,
             lock: transaction.LOCK.UPDATE,
@@ -145,15 +194,10 @@ exports.checkout = catchAsync(async (req, res, next) => {
               {
                 model: VariantAttributeValue,
                 as: "attributeValues",
+                required: false,
                 include: [
-                  {
-                    model: Attribute,
-                    as: "attribute",
-                  },
-                  {
-                    model: AttributeOption,
-                    as: "option",
-                  },
+                  { model: Attribute, as: "attribute", required: false },
+                  { model: AttributeOption, as: "option", required: false },
                 ],
               },
             ],
@@ -162,29 +206,25 @@ exports.checkout = catchAsync(async (req, res, next) => {
           if (
             !variant ||
             String(variant.product_id) !== String(product.id) ||
-            !variant.is_active
+            variant.is_active === false
           ) {
             throw new AppError("Selected product variant is unavailable", 400);
           }
 
           if (Number(variant.quantity) < quantity) {
             throw new AppError(
-              `Insufficient stock for ${getProductName(product)} (${variant.sku})`,
+              `Insufficient stock for ${getProductName(product)} (${variant.sku || variantId})`,
               400,
             );
           }
 
           price = getVariantPrice(variant, product);
-          sku = variant.sku || product.sku;
-
-          // Save readable values from the database, not IDs.
+          sku = getVariantSku(variant, product);
           selectedAttributes = buildVariantSnapshot(variant, cartItem);
         } else {
           // ------------------------------------------
           // Product without a selected variant
           // ------------------------------------------
-
-          // If the product has variants, selecting one is mandatory.
           const variantCount = await ProductVariant.count({
             where: {
               product_id: product.id,
@@ -207,7 +247,7 @@ exports.checkout = catchAsync(async (req, res, next) => {
             );
           }
 
-          price = Number(product.price);
+          price = toNumber(product.price);
           sku = product.sku;
         }
 
@@ -233,23 +273,19 @@ exports.checkout = catchAsync(async (req, res, next) => {
       // --------------------------------------------
       // Calculate totals using integer cents
       // --------------------------------------------
-
       const subtotalCents = preparedItems.reduce(
         (sum, item) => sum + item.totalCents,
         0,
       );
 
-      // Keep your existing shipping rule.
+      // Free shipping over 500 TMT (50000 cents)
       const shippingCents = subtotalCents > 50000 ? 0 : 2000;
-
       const discountCents = 0;
-
       const totalCents = subtotalCents + shippingCents - discountCents;
 
       // --------------------------------------------
       // Create order
       // --------------------------------------------
-
       const order = await Order.create(
         {
           order_number: genNo(),
@@ -257,14 +293,11 @@ exports.checkout = catchAsync(async (req, res, next) => {
           status: "pending",
           payment_status: "pending",
           payment_method,
-
           subtotal: fromCents(subtotalCents),
           shipping_cost: fromCents(shippingCents),
           discount: fromCents(discountCents),
           total: fromCents(totalCents),
-
           note,
-
           shipping_address: {
             full_name: full_name.trim(),
             phone: phone.trim(),
@@ -279,20 +312,16 @@ exports.checkout = catchAsync(async (req, res, next) => {
       // --------------------------------------------
       // Save one OrderItem for every cart line
       // --------------------------------------------
-
       await OrderItem.bulkCreate(
         preparedItems.map((item) => ({
           order_id: order.id,
           product_id: item.product.id,
           variant_id: item.variantId,
-
           product_name: getProductName(item.product),
           product_sku: item.sku,
-
           price: fromCents(item.priceCents),
           quantity: item.quantity,
           total: fromCents(item.totalCents),
-
           selected_attributes: item.selectedAttributes,
         })),
         { transaction },
@@ -301,16 +330,13 @@ exports.checkout = catchAsync(async (req, res, next) => {
       // --------------------------------------------
       // Decrease correct inventory
       // --------------------------------------------
-
       for (const item of preparedItems) {
         if (item.variant) {
-          // Variant order: decrease variant stock only.
           await item.variant.decrement("quantity", {
             by: item.quantity,
             transaction,
           });
         } else {
-          // Standard product: decrease product stock.
           await item.product.decrement("quantity", {
             by: item.quantity,
             transaction,
@@ -328,7 +354,6 @@ exports.checkout = catchAsync(async (req, res, next) => {
       // --------------------------------------------
       // Payment
       // --------------------------------------------
-
       await Payment.create(
         {
           order_id: order.id,
@@ -342,7 +367,6 @@ exports.checkout = catchAsync(async (req, res, next) => {
       // --------------------------------------------
       // Clear cart
       // --------------------------------------------
-
       await CartItem.destroy({
         where: { user_id: userId },
         transaction,
@@ -359,7 +383,6 @@ exports.checkout = catchAsync(async (req, res, next) => {
   // ------------------------------------------------
   // Notifications after successful transaction
   // ------------------------------------------------
-
   const admins = await User.findAll({
     where: {
       role: { [Op.in]: ["admin", "manager"] },
@@ -384,7 +407,6 @@ exports.checkout = catchAsync(async (req, res, next) => {
   }
 
   const io = req.app.get("io");
-
   if (io) {
     io.to("admins").emit("new_order", {
       orderId: result.orderId,
@@ -399,14 +421,8 @@ exports.checkout = catchAsync(async (req, res, next) => {
   // Return complete order with its item snapshots.
   const full = await Order.findByPk(result.orderId, {
     include: [
-      {
-        model: OrderItem,
-        as: "items",
-      },
-      {
-        model: Payment,
-        as: "payments",
-      },
+      { model: OrderItem, as: "items" },
+      { model: Payment, as: "payments" },
     ],
   });
 
@@ -447,14 +463,7 @@ exports.getAll = catchAsync(async (req, res) => {
       {
         model: User,
         as: "user",
-        attributes: [
-          "id",
-          "first_name",
-          "last_name",
-          "username",
-          "phone",
-          "username",
-        ],
+        attributes: ["id", "first_name", "last_name", "username", "phone"],
       },
       { model: OrderItem, as: "items" },
     ],
@@ -478,14 +487,7 @@ exports.getOne = catchAsync(async (req, res, next) => {
       {
         model: User,
         as: "user",
-        attributes: [
-          "id",
-          "first_name",
-          "last_name",
-          "username",
-          "phone",
-          "username",
-        ],
+        attributes: ["id", "first_name", "last_name", "username", "phone"],
       },
       { model: OrderItem, as: "items" },
       { model: Payment, as: "payments" },

@@ -15,7 +15,6 @@ module.exports = (sequelize, DataTypes) => {
         as: "product",
       });
 
-      // Add this association if your model is named ProductVariant.
       if (models.ProductVariant) {
         OrderItem.belongsTo(models.ProductVariant, {
           foreignKey: "variant_id",
@@ -28,8 +27,8 @@ module.exports = (sequelize, DataTypes) => {
   OrderItem.init(
     {
       id: {
-        type: DataTypes.INTEGER,
-        autoIncrement: true,
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
         primaryKey: true,
       },
 
@@ -48,6 +47,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
 
+      // Snapshot fields – never change after order is placed
       product_name: {
         type: DataTypes.STRING(255),
         allowNull: false,
@@ -61,19 +61,27 @@ module.exports = (sequelize, DataTypes) => {
       price: {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
+        defaultValue: 0,
       },
 
       quantity: {
         type: DataTypes.INTEGER,
         allowNull: false,
         defaultValue: 1,
+        validate: { min: 1 },
       },
 
       total: {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
+        defaultValue: 0,
       },
 
+      /**
+       * Human-readable attribute snapshot, e.g.
+       * { color: "Black", size: "XL", variant_id: "uuid-..." }
+       * Stored so admin / order history stays correct even if catalog changes.
+       */
       selected_attributes: {
         type: DataTypes.JSON,
         allowNull: true,
