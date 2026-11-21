@@ -11,6 +11,7 @@ const rateLimit = require("express-rate-limit");
 const { sequelize } = require("./models");
 const errorHandler = require("./middleware/errorHandler");
 const AppError = require("./utils/appError");
+const { initializeSocket } = require("./socket");
 
 const app = express();
 const server = http.createServer(app);
@@ -23,12 +24,6 @@ const allowedOrigins = [
   "http://127.0.0.1:3000",
   "http://127.0.0.1:3001",
 ].filter(Boolean);
-
-const io = new Server(server, {
-  cors: { origin: allowedOrigins, credentials: true },
-});
-app.set("io", io);
-require("./socket")(io);
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(
@@ -71,6 +66,7 @@ app.use("/api/banners", require("./routes/bannerRoutes"));
 app.use("/api/admin", require("./routes/adminRoutes"));
 app.use("/api/files", require("./routes/fileRoutes"));
 app.use("/api/attributes", require("./routes/attributeRoutes"));
+app.use("/api/reports", require("./routes/reportRoutes"));
 
 app.all("*", (req, res, next) =>
   next(new AppError(`Not found: ${req.originalUrl}`, 404)),
@@ -80,8 +76,23 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 5000;
 sequelize
   .authenticate()
-  .then(() => {
+  .then(async () => {
     console.log("DB connected successfully");
+    const io = await initializeSocket(server);
+    io.on("connection", async (socket) => {
+      const userId = socket.handshake.query.id;
+      const normalizedUserId = userId;
+
+      console.log(
+        `User with ID ${normalizedUserId} connected with ${socket.id}`,
+      );
+
+      socket.join(normalizedUserId);
+
+      socket.on("disconnect", async () => {
+        console.log(`Client disconnected ${normalizedUserId}: ${socket.id}`);
+      });
+    });
     server.listen(PORT, () => console.log(`Server listened on port ${PORT}`));
   })
   .catch((e) => {

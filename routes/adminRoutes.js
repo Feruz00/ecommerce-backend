@@ -1,10 +1,14 @@
-const r = require('express').Router();
-const c = require('../controllers/adminController');
-const { protect, restrictTo } = require('../middleware/auth');
+const router = require("express").Router();
 
-r.use(protect, restrictTo('admin', 'manager'));
-r.get('/dashboard', c.dashboard);
-r.get('/notifications', c.notifications);
-r.patch('/notifications/:id/read', c.markNotificationRead);
+const adminController = require("../controllers/adminController");
 
-module.exports = r;
+const { protect, restrictTo } = require("../middleware/auth");
+
+router.use(protect, restrictTo("admin", "manager"));
+
+router.get("/dashboard", adminController.dashboard);
+
+router.get("/notifications", adminController.notifications);
+router.patch("/notifications/:id/read", adminController.markNotificationRead);
+
+module.exports = router;
