@@ -67,7 +67,11 @@ app.use("/api/admin", require("./routes/adminRoutes"));
 app.use("/api/files", require("./routes/fileRoutes"));
 app.use("/api/attributes", require("./routes/attributeRoutes"));
 app.use("/api/reports", require("./routes/reportRoutes"));
-
+app.use("/api/my-orders", require("./routes/userOrderRoutes"));
+app.use(
+  "/api/admin/notifications",
+  require("./routes/adminNotificationRoutes"),
+);
 app.all("*", (req, res, next) =>
   next(new AppError(`Not found: ${req.originalUrl}`, 404)),
 );
@@ -80,7 +84,8 @@ sequelize
     console.log("DB connected successfully");
     const io = await initializeSocket(server);
     io.on("connection", async (socket) => {
-      const userId = socket.handshake.query.id;
+      // console.log(socket.handshake);
+      const userId = socket.handshake.auth.userId;
       const normalizedUserId = userId;
 
       console.log(

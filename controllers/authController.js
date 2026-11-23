@@ -6,6 +6,7 @@ const catchAsync = require("../utils/catchAsync");
 exports.register = catchAsync(async (req, res, next) => {
   const { first_name, last_name, username, password, phone, preferred_lang } =
     req.body;
+  console.log(req.body);
   if (!username || !password || !first_name || !last_name) {
     return next(
       new AppError(

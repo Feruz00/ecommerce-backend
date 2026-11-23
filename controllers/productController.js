@@ -107,7 +107,6 @@ function mapProduct(record, locale) {
   product.name =
     product.translations?.[locale]?.name ||
     product.translations?.en?.name ||
-    product.slug ||
     "";
 
   product.shortDescription =
@@ -607,7 +606,7 @@ function productIncludes({
     {
       model: Category,
       as: "category",
-      attributes: ["id", "slug", "translations"],
+      attributes: ["id", "translations"],
     },
     {
       model: File,
@@ -744,11 +743,6 @@ exports.getAll = catchAsync(async (req, res) => {
           [Op.like]: query,
         },
       },
-      {
-        slug: {
-          [Op.like]: query,
-        },
-      },
 
       // IMPORTANT: explicitly reference Product table.
       // This prevents ambiguity with Category.translations.
@@ -804,7 +798,12 @@ exports.getAll = catchAsync(async (req, res) => {
 
   const { count, rows } = await Product.findAndCountAll({
     where,
-    include: productIncludes(),
+    include: [
+      ...productIncludes({
+        // includeAttributes: true,
+        includeVariants: true,
+      }),
+    ],
     limit,
     offset: (page - 1) * limit,
     order,
@@ -834,7 +833,7 @@ exports.getOne = catchAsync(async (req, res, next) => {
 
   const product = await Product.findOne({
     where: {
-      [Op.or]: [{ id: req.params.id }, { slug: req.params.id }],
+      [Op.or]: [{ id: req.params.id }],
       ...(req.query.include_inactive === "true" ? {} : { is_active: true }),
     },
     include: [

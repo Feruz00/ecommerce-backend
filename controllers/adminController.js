@@ -59,7 +59,6 @@ const getProductName = (product, locale = "en") => {
     translations?.en?.name ||
     translations?.tm?.name ||
     translations?.ru?.name ||
-    product.slug ||
     product.sku ||
     "Unnamed product"
   );
@@ -101,7 +100,7 @@ exports.dashboard = catchAsync(async (req, res) => {
         ],
       ],
       where: {
-        payment_status: "paid",
+        // status: "paid",
         status: {
           [Op.ne]: "cancelled",
         },
@@ -115,7 +114,7 @@ exports.dashboard = catchAsync(async (req, res) => {
         "order_number",
         "user_id",
         "status",
-        "payment_status",
+        // "payment_status",
         "payment_method",
         "total",
         "created_at",
@@ -134,7 +133,7 @@ exports.dashboard = catchAsync(async (req, res) => {
     }),
 
     Product.findAll({
-      attributes: ["id", "sku", "slug", "translations", "quantity"],
+      attributes: ["id", "sku", "translations", "quantity"],
       where: {
         quantity: {
           [Op.lte]: LOW_STOCK_LIMIT,

@@ -19,6 +19,7 @@ const {
 const AppError = require("../utils/appError");
 const catchAsync = require("../utils/catchAsync");
 const { v4: uuidv4 } = require("uuid");
+const { getIO } = require("../socket");
 
 const genNo = () => {
   const d = new Date();
@@ -98,8 +99,7 @@ function buildVariantSnapshot(variant, cartItem) {
       entry?.attribute?.code ||
       entry?.definition?.code ||
       entry?.code ||
-      entry?.attribute_code ||
-      entry?.attribute?.slug;
+      entry?.attribute_code;
 
     if (!code) continue;
 
@@ -130,10 +130,18 @@ exports.checkout = catchAsync(async (req, res, next) => {
 
   const { full_name, phone, city, district, street } = address;
 
+  const delivery_method = body.delivery_method || "delivery";
   const payment_method = body.payment_method || "cash";
   const note = body.note || body.notes || null;
 
-  if (!full_name || !phone || !city || !street) {
+  if (!["delivery", "pickup"].includes(delivery_method)) {
+    return next(new AppError("Invalid delivery method", 400));
+  }
+
+  if (!full_name || !phone) {
+    return next(new AppError("Customer name and phone are required", 400));
+  }
+  if (delivery_method === "delivery" && (!city || !street)) {
     return next(new AppError("Shipping address is incomplete", 400));
   }
 
@@ -279,7 +287,8 @@ exports.checkout = catchAsync(async (req, res, next) => {
       );
 
       // Free shipping over 500 TMT (50000 cents)
-      const shippingCents = subtotalCents > 50000 ? 0 : 2000;
+      const shippingCents =
+        delivery_method === "pickup" ? 0 : subtotalCents > 50000 ? 0 : 2000;
       const discountCents = 0;
       const totalCents = subtotalCents + shippingCents - discountCents;
 
@@ -290,25 +299,33 @@ exports.checkout = catchAsync(async (req, res, next) => {
         {
           order_number: genNo(),
           user_id: userId,
-          status: "pending",
-          payment_status: "pending",
+          status: "processing",
+
+          delivery_method,
           payment_method,
+
           subtotal: fromCents(subtotalCents),
           shipping_cost: fromCents(shippingCents),
           discount: fromCents(discountCents),
           total: fromCents(totalCents),
+
           note,
+
           shipping_address: {
             full_name: full_name.trim(),
             phone: phone.trim(),
-            city: city.trim(),
-            district: district?.trim() || null,
-            street: street.trim(),
+
+            ...(delivery_method === "delivery"
+              ? {
+                  city: city.trim(),
+                  district: district?.trim() || null,
+                  street: street.trim(),
+                }
+              : {}),
           },
         },
         { transaction },
       );
-
       // --------------------------------------------
       // Save one OrderItem for every cart line
       // --------------------------------------------
@@ -385,37 +402,61 @@ exports.checkout = catchAsync(async (req, res, next) => {
   // ------------------------------------------------
   const admins = await User.findAll({
     where: {
-      role: { [Op.in]: ["admin", "manager"] },
+      role: {
+        [Op.in]: ["admin", "manager"],
+      },
       status: "active",
     },
+    attributes: ["id"],
   });
 
-  if (admins.length) {
-    await Notification.bulkCreate(
-      admins.map((admin) => ({
-        id: uuidv4(),
-        user_id: admin.id,
-        type: "order_new",
-        title: "New Order",
-        message: `Order #${result.orderNumber} — ${result.total} TMT`,
-        data: {
-          orderId: result.orderId,
-          orderNumber: result.orderNumber,
-        },
-      })),
-    );
+  const notifications = admins.map((admin) => ({
+    id: uuidv4(),
+    user_id: admin.id,
+    type: "order_new",
+    title: "New Order",
+    message: `Order #${result.orderNumber} — ${result.total} TMT`,
+    data: {
+      orderId: result.orderId,
+      orderNumber: result.orderNumber,
+      total: result.total,
+    },
+    is_read: false,
+  }));
+
+  let createdNotifications = [];
+
+  if (notifications.length) {
+    createdNotifications = await Notification.bulkCreate(notifications);
   }
 
-  const io = req.app.get("io");
+  const io = getIO();
   if (io) {
-    io.to("admins").emit("new_order", {
+    const payload = {
       orderId: result.orderId,
       orderNumber: result.orderNumber,
       total: result.total,
       customer: {
         name: `${req.user.first_name || ""} ${req.user.last_name || ""}`.trim(),
       },
-    });
+    };
+
+    // Update orders page and dashboard.
+    io.to("admins").emit("new_order", payload);
+
+    // Update notification bell and notification list.
+    for (const notification of createdNotifications) {
+      io.to("admins").emit("new_notification", {
+        id: notification.id,
+        userId: notification.user_id,
+        type: notification.type,
+        title: notification.title,
+        message: notification.message,
+        data: notification.data,
+        is_read: notification.is_read,
+        created_at: notification.created_at,
+      });
+    }
   }
 
   // Return complete order with its item snapshots.
@@ -434,19 +475,54 @@ exports.checkout = catchAsync(async (req, res, next) => {
   });
 });
 
-exports.myOrders = catchAsync(async (req, res) => {
-  const orders = await Order.findAll({
-    where: { user_id: req.user.id },
+exports.myOrders = catchAsync(async (req, res, next) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
+
+  const allowedStatuses = [
+    "pending",
+    "confirmed",
+    "processing",
+    "shipped",
+    "delivered",
+    "cancelled",
+  ];
+
+  const where = {
+    user_id: req.user.id,
+  };
+
+  if (req.query.status && req.query.status !== "all") {
+    if (!allowedStatuses.includes(req.query.status)) {
+      return next(new AppError("Invalid order status", 400));
+    }
+
+    where.status = req.query.status;
+  }
+
+  const { count, rows } = await Order.findAndCountAll({
+    where,
     include: [
       { model: OrderItem, as: "items" },
       { model: Payment, as: "payments" },
     ],
+    distinct: true,
+    limit,
+    offset: (page - 1) * limit,
     order: [["created_at", "DESC"]],
   });
 
   res.json({
     status: "success",
-    data: { orders },
+    data: {
+      orders: rows,
+      pagination: {
+        total: count,
+        page,
+        limit,
+        totalPages: Math.ceil(count / limit),
+      },
+    },
   });
 });
 
@@ -463,9 +539,24 @@ exports.getAll = catchAsync(async (req, res) => {
       {
         model: User,
         as: "user",
-        attributes: ["id", "first_name", "last_name", "username", "phone"],
+        attributes: [
+          "id",
+          "first_name",
+          "last_name",
+          "username",
+          "username",
+          "phone",
+        ],
       },
-      { model: OrderItem, as: "items" },
+      {
+        model: OrderItem,
+        as: "items",
+      },
+      {
+        model: Payment,
+        as: "payments",
+        attributes: ["id", "amount", "method", "status"],
+      },
     ],
     limit,
     offset: (page - 1) * limit,
@@ -477,7 +568,9 @@ exports.getAll = catchAsync(async (req, res) => {
     total: count,
     page,
     limit,
-    data: { orders: rows },
+    data: {
+      orders: rows,
+    },
   });
 });
 
@@ -498,11 +591,12 @@ exports.getOne = catchAsync(async (req, res, next) => {
     return next(new AppError("Order not found", 404));
   }
 
+  // Customers can only access their own orders.
   if (
     req.user.role === "customer" &&
     String(order.user_id) !== String(req.user.id)
   ) {
-    return next(new AppError("Forbidden", 403));
+    return next(new AppError("Order not found", 404));
   }
 
   res.json({
@@ -512,12 +606,6 @@ exports.getOne = catchAsync(async (req, res, next) => {
 });
 
 exports.updateStatus = catchAsync(async (req, res, next) => {
-  const order = await Order.findByPk(req.params.id);
-
-  if (!order) {
-    return next(new AppError("Order not found", 404));
-  }
-
   const allowedStatuses = [
     "pending",
     "confirmed",
@@ -527,32 +615,28 @@ exports.updateStatus = catchAsync(async (req, res, next) => {
     "cancelled",
   ];
 
-  const allowedPaymentStatuses = ["pending", "paid", "failed", "refunded"];
+  const { status, note } = req.body;
 
-  if (
-    req.body.status !== undefined &&
-    !allowedStatuses.includes(req.body.status)
-  ) {
+  if (status === undefined && note === undefined) {
+    return next(new AppError("Nothing to update", 400));
+  }
+
+  if (status !== undefined && !allowedStatuses.includes(status)) {
     return next(new AppError("Invalid order status", 400));
   }
 
-  if (
-    req.body.payment_status !== undefined &&
-    !allowedPaymentStatuses.includes(req.body.payment_status)
-  ) {
-    return next(new AppError("Invalid payment status", 400));
+  const order = await Order.findByPk(req.params.id);
+
+  if (!order) {
+    return next(new AppError("Order not found", 404));
   }
 
-  if (req.body.status !== undefined) {
-    order.status = req.body.status;
+  if (status !== undefined) {
+    order.status = status;
   }
 
-  if (req.body.payment_status !== undefined) {
-    order.payment_status = req.body.payment_status;
-  }
-
-  if (req.body.note !== undefined) {
-    order.note = req.body.note;
+  if (note !== undefined) {
+    order.note = note;
   }
 
   await order.save();

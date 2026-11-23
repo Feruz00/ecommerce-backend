@@ -1,12 +1,12 @@
-'use strict';
-const { Model } = require('sequelize');
+"use strict";
+const { Model } = require("sequelize");
 
 module.exports = (sequelize, DataTypes) => {
   class Order extends Model {
     static associate(models) {
-      Order.belongsTo(models.User, { foreignKey: 'user_id', as: 'user' });
-      Order.hasMany(models.OrderItem, { foreignKey: 'order_id', as: 'items' });
-      Order.hasMany(models.Payment, { foreignKey: 'order_id', as: 'payments' });
+      Order.belongsTo(models.User, { foreignKey: "user_id", as: "user" });
+      Order.hasMany(models.OrderItem, { foreignKey: "order_id", as: "items" });
+      Order.hasMany(models.Payment, { foreignKey: "order_id", as: "payments" });
     }
   }
 
@@ -17,29 +17,33 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: DataTypes.UUIDV4,
         primaryKey: true,
       },
-      order_number: { type: DataTypes.STRING(30), allowNull: false, unique: true },
+      order_number: {
+        type: DataTypes.STRING(30),
+        allowNull: false,
+        unique: true,
+      },
       user_id: { type: DataTypes.UUID, allowNull: false },
       status: {
         type: DataTypes.ENUM(
-          'pending',
-          'confirmed',
-          'processing',
-          'shipped',
-          'delivered',
-          'cancelled'
+          "pending",
+          "confirmed",
+          "processing",
+          "shipped",
+          "delivered",
+          "cancelled",
         ),
         allowNull: false,
-        defaultValue: 'pending',
+        defaultValue: "pending",
       },
-      payment_status: {
-        type: DataTypes.ENUM('pending', 'paid', 'failed', 'refunded'),
-        allowNull: false,
-        defaultValue: 'pending',
-      },
+      // payment_status: {
+      //   type: DataTypes.ENUM('pending', 'paid', 'failed', 'refunded'),
+      //   allowNull: false,
+      //   defaultValue: 'pending',
+      // },
       payment_method: {
         type: DataTypes.STRING(50),
         allowNull: false,
-        defaultValue: 'cash',
+        defaultValue: "cash",
       },
       subtotal: {
         type: DataTypes.DECIMAL(12, 2),
@@ -50,6 +54,11 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: false,
         defaultValue: 0,
+      },
+      delivery_method: {
+        type: DataTypes.ENUM("delivery", "pickup"),
+        allowNull: false,
+        defaultValue: "delivery",
       },
       discount: {
         type: DataTypes.DECIMAL(12, 2),
@@ -66,10 +75,10 @@ module.exports = (sequelize, DataTypes) => {
     },
     {
       sequelize,
-      modelName: 'Order',
-      tableName: 'tbl_orders',
+      modelName: "Order",
+      tableName: "tbl_orders",
       underscored: true,
-    }
+    },
   );
 
   return Order;

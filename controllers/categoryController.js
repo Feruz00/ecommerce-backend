@@ -1,54 +1,222 @@
-const { Category, File } = require('../models');
-const AppError = require('../utils/appError');
-const catchAsync = require('../utils/catchAsync');
+const { Category, File } = require("../models");
+const AppError = require("../utils/appError");
+const catchAsync = require("../utils/catchAsync");
 
-const lang = (req) => req.headers['accept-language']?.slice(0, 2) || 'en';
-
-const mapCat = (c, l) => {
-  const j = c.toJSON ? c.toJSON() : c;
-  j.name = j.translations?.[l]?.name || j.translations?.en?.name || '';
-  if (j.children) j.children = j.children.map((ch) => mapCat(ch, l));
-  return j;
+const lang = (req) => {
+  const header = req.headers["accept-language"] || "en";
+  return header.slice(0, 2).toLowerCase();
 };
 
-exports.getTree = catchAsync(async (req, res) => {
-  const l = lang(req);
-  const all = await Category.findAll({
-    where: { is_active: true },
-    include: [{ model: File, as: 'imageFile', attributes: ['url'] }],
-    order: [['sort_order', 'ASC']],
-  });
+const mapCategory = (category, language) => {
+  const item = category.toJSON ? category.toJSON() : { ...category };
+
+  item.name =
+    item.translations?.[language]?.name || item.translations?.en?.name || "";
+
+  item.image = item.imageFile?.url || null;
+
+  return item;
+};
+
+const buildTree = (categories, language) => {
   const map = {};
-  all.forEach((c) => { map[c.id] = { ...mapCat(c, l), children: [], image: c.imageFile?.url }; });
-  const tree = [];
-  all.forEach((c) => {
-    if (c.parent_id && map[c.parent_id]) map[c.parent_id].children.push(map[c.id]);
-    else tree.push(map[c.id]);
+
+  categories.forEach((category) => {
+    const item = mapCategory(category, language);
+
+    map[item.id] = {
+      ...item,
+      children: [],
+    };
   });
-  res.json({ status: 'success', data: { categories: tree } });
+
+  const tree = [];
+
+  categories.forEach((category) => {
+    const item = map[category.id];
+
+    if (category.parent_id && map[category.parent_id]) {
+      map[category.parent_id].children.push(item);
+    } else {
+      tree.push(item);
+    }
+  });
+
+  return tree;
+};
+
+// Prevent a category from being its own parent or a descendant of itself.
+const validateParent = async (parentId, categoryId = null) => {
+  if (!parentId) return;
+
+  const parent = await Category.findByPk(parentId);
+
+  if (!parent) {
+    throw new AppError("Parent category not found", 404);
+  }
+
+  let current = parent;
+
+  while (current) {
+    if (categoryId && Number(current.id) === Number(categoryId)) {
+      throw new AppError(
+        "A category cannot be moved inside itself or one of its descendants",
+        400,
+      );
+    }
+
+    if (!current.parent_id) break;
+
+    current = await Category.findByPk(current.parent_id);
+
+    if (!current) break;
+  }
+};
+
+const categoryIncludes = [
+  {
+    model: File,
+    as: "imageFile",
+    attributes: ["id", "url"],
+    required: false,
+  },
+];
+
+exports.getTree = catchAsync(async (req, res) => {
+  const language = lang(req);
+
+  const categories = await Category.findAll({
+    where: { is_active: true },
+    include: categoryIncludes,
+    order: [
+      ["sort_order", "ASC"],
+      ["id", "ASC"],
+    ],
+  });
+
+  const tree = buildTree(categories, language);
+
+  res.json({
+    status: "success",
+    data: {
+      categories: tree,
+    },
+  });
 });
 
 exports.getAll = catchAsync(async (req, res) => {
-  const l = lang(req);
-  const cats = await Category.findAll({ order: [['sort_order', 'ASC']] });
-  res.json({ status: 'success', data: { categories: cats.map((c) => mapCat(c, l)) } });
+  const language = lang(req);
+
+  const categories = await Category.findAll({
+    include: categoryIncludes,
+    order: [
+      ["sort_order", "ASC"],
+      ["id", "ASC"],
+    ],
+  });
+
+  const tree = buildTree(categories, language);
+
+  res.json({
+    status: "success",
+    data: {
+      categories: tree,
+    },
+  });
 });
 
 exports.create = catchAsync(async (req, res) => {
-  const cat = await Category.create(req.body);
-  res.status(201).json({ status: 'success', data: { category: cat } });
+  const { parent_id, sort_order, is_active, image_file_id, translations } =
+    req.body;
+
+  await validateParent(parent_id);
+
+  const category = await Category.create({
+    parent_id: parent_id || null,
+    sort_order: sort_order ?? 0,
+    is_active: is_active ?? true,
+    image_file_id: image_file_id || null,
+    translations: translations || {},
+  });
+
+  const created = await Category.findByPk(category.id, {
+    include: categoryIncludes,
+  });
+
+  res.status(201).json({
+    status: "success",
+    data: {
+      category: mapCategory(created, lang(req)),
+    },
+  });
 });
 
-exports.update = catchAsync(async (req, res, next) => {
-  const cat = await Category.findByPk(req.params.id);
-  if (!cat) return next(new AppError('Not found', 404));
-  await cat.update(req.body);
-  res.json({ status: 'success', data: { category: cat } });
+exports.update = catchAsync(async (req, res) => {
+  const category = await Category.findByPk(req.params.id);
+
+  if (!category) {
+    throw new AppError("Category not found", 404);
+  }
+
+  const { parent_id, sort_order, is_active, image_file_id, translations } =
+    req.body;
+
+  if (Object.prototype.hasOwnProperty.call(req.body, "parent_id")) {
+    await validateParent(parent_id, category.id);
+  }
+
+  const updates = {};
+
+  if (parent_id !== undefined || "parent_id" in req.body) {
+    updates.parent_id = parent_id || null;
+  }
+
+  if (sort_order !== undefined) {
+    updates.sort_order = sort_order;
+  }
+
+  if (is_active !== undefined) {
+    updates.is_active = is_active;
+  }
+
+  if (image_file_id !== undefined) {
+    updates.image_file_id = image_file_id || null;
+  }
+
+  if (translations !== undefined) {
+    updates.translations = translations;
+  }
+
+  await category.update(updates);
+
+  const updated = await Category.findByPk(category.id, {
+    include: categoryIncludes,
+  });
+
+  res.json({
+    status: "success",
+    data: {
+      category: mapCategory(updated, lang(req)),
+    },
+  });
 });
 
-exports.remove = catchAsync(async (req, res, next) => {
-  const cat = await Category.findByPk(req.params.id);
-  if (!cat) return next(new AppError('Not found', 404));
-  await cat.destroy();
+exports.remove = catchAsync(async (req, res) => {
+  const category = await Category.findByPk(req.params.id);
+
+  if (!category) {
+    throw new AppError("Category not found", 404);
+  }
+
+  const childrenCount = await Category.count({
+    where: { parent_id: category.id },
+  });
+
+  if (childrenCount > 0) {
+    throw new AppError("Cannot delete a category that has subcategories", 400);
+  }
+
+  await category.destroy();
+
   res.status(204).send();
 });

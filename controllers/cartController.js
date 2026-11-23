@@ -57,8 +57,7 @@ function buildAttributeSnapshot(variant, cartSelected) {
       entry?.attribute?.code ||
       entry?.definition?.code ||
       entry?.code ||
-      entry?.attribute_code ||
-      entry?.attribute?.slug;
+      entry?.attribute_code;
 
     if (!code) continue;
 
@@ -184,7 +183,6 @@ exports.getCart = catchAsync(async (req, res) => {
       product: {
         id: p.id,
         sku: p.sku,
-        slug: p.slug,
         price: toNumber(p.price),
         quantity: p.quantity,
         name,

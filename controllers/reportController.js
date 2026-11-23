@@ -115,10 +115,6 @@ function buildOrderWhere(query) {
     where.status = query.status;
   }
 
-  if (query.payment_status) {
-    where.payment_status = query.payment_status;
-  }
-
   if (query.payment_method) {
     where.payment_method = query.payment_method;
   }
@@ -183,12 +179,7 @@ exports.getSummary = catchAsync(async (req, res) => {
         raw: true,
       }),
 
-      Order.findAll({
-        where,
-        attributes: ["payment_status", [fn("COUNT", col("Order.id")), "count"]],
-        group: ["Order.payment_status"],
-        raw: true,
-      }),
+      // Group orders by payment status.
 
       OrderItem.findOne({
         attributes: [
@@ -213,16 +204,12 @@ exports.getSummary = catchAsync(async (req, res) => {
         raw: true,
       }),
     ]);
-
   const byStatus = {};
   statusGroups.forEach((row) => {
     byStatus[row.status] = toNumber(row.count);
   });
 
   const byPayment = {};
-  paymentGroups.forEach((row) => {
-    byPayment[row.payment_status] = toNumber(row.count);
-  });
 
   res.json({
     status: "success",
@@ -340,7 +327,7 @@ exports.getTopProducts = catchAsync(async (req, res) => {
       {
         model: Product,
         as: "product",
-        attributes: ["id", "sku", "slug", "translations", "price"],
+        attributes: ["id", "sku", "translations", "price"],
         required: false,
       },
     ],
@@ -517,7 +504,6 @@ exports.exportOrders = catchAsync(async (req, res) => {
         customer,
         phone,
         o.status,
-        o.payment_status,
         o.payment_method,
         itemsCount,
         o.subtotal,
@@ -581,7 +567,7 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
           {
             model: Product,
             as: "product",
-            attributes: ["id", "sku", "slug", "translations"],
+            attributes: ["id", "sku", "translations"],
             required: false,
           },
         ],
@@ -626,7 +612,6 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
     { header: "Order Total", key: "total", width: 16 },
     { header: "Status", key: "status", width: 18 },
     { header: "Payment Method", key: "paymentMethod", width: 20 },
-    { header: "Payment Status", key: "paymentStatus", width: 20 },
     { header: "City", key: "city", width: 20 },
     { header: "Note", key: "note", width: 35 },
   ];
@@ -651,7 +636,6 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
       total: toNumber(o.total),
       status: o.status || "",
       paymentMethod: o.payment_method || "",
-      paymentStatus: o.payment_status || "",
       city: o.shipping_address?.city || "",
       note: o.note || "",
     };
