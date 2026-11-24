@@ -1,14 +1,15 @@
-const path = require('path');
-const fs = require('fs');
-const { File } = require('../models');
-const AppError = require('../utils/appError');
-const catchAsync = require('../utils/catchAsync');
-const { Op } = require('sequelize');
-const { compressImage } = require('../utils/imageCompress');
+const path = require("path");
+const fs = require("fs");
+const { File } = require("../models");
+const AppError = require("../utils/appError");
+const catchAsync = require("../utils/catchAsync");
+const { Op } = require("sequelize");
+const { compressImage } = require("../utils/imageCompress");
 
-const baseUrl = () => process.env.SERVER_URL || `http://localhost:${process.env.PORT || 5000}`;
+const baseUrl = () =>
+  process.env.SERVER_URL || `http://localhost:${process.env.PORT || 5000}`;
 
-const buildFileUrl = (folder, filename) => `${baseUrl()}/uploads/${folder}/${filename}`;
+const buildFileUrl = (folder, filename) => `/uploads/${folder}/${filename}`;
 
 /**
  * Upload one or more images → compress → create tbl_files records
@@ -26,16 +27,18 @@ exports.upload = catchAsync(async (req, res, next) => {
   }
 
   if (!files.length) {
-    return next(new AppError('No file uploaded', 400));
+    return next(new AppError("No file uploaded", 400));
   }
 
   const entity_type = req.body.entity_type || req.query.entity_type || null;
   const entity_id = req.body.entity_id || req.query.entity_id || null;
   const alt = req.body.alt || null;
-  const is_primary = req.body.is_primary === 'true' || req.body.is_primary === true;
-  const skipCompress = req.body.skip_compress === 'true' || req.body.skip_compress === true;
+  const is_primary =
+    req.body.is_primary === "true" || req.body.is_primary === true;
+  const skipCompress =
+    req.body.skip_compress === "true" || req.body.skip_compress === true;
 
-  const folder = req.uploadFolder || entity_type || 'misc';
+  const folder = req.uploadFolder || entity_type || "misc";
   const records = [];
   const compressionStats = [];
 
@@ -45,7 +48,13 @@ exports.upload = catchAsync(async (req, res, next) => {
     let finalFilename = f.filename;
     let finalMime = f.mimetype;
     let finalSize = f.size;
-    let meta = { compressed: false, original_size: f.size, width: null, height: null, saved_percent: 0 };
+    let meta = {
+      compressed: false,
+      original_size: f.size,
+      width: null,
+      height: null,
+      saved_percent: 0,
+    };
 
     // Compress unless skipped
     if (!skipCompress) {
@@ -64,7 +73,10 @@ exports.upload = catchAsync(async (req, res, next) => {
           height: result.height,
         });
       } catch (err) {
-        console.error('Image compression failed, keeping original:', err.message);
+        console.error(
+          "Image compression failed, keeping original:",
+          err.message,
+        );
         compressionStats.push({ error: err.message, kept_original: true });
       }
     }
@@ -74,7 +86,13 @@ exports.upload = catchAsync(async (req, res, next) => {
     if (is_primary && i === 0 && entity_type && entity_id) {
       await File.update(
         { is_primary: false },
-        { where: { entity_type, entity_id: String(entity_id), is_primary: true } }
+        {
+          where: {
+            entity_type,
+            entity_id: String(entity_id),
+            is_primary: true,
+          },
+        },
       );
     }
 
@@ -85,7 +103,7 @@ exports.upload = catchAsync(async (req, res, next) => {
       url,
       mime_type: finalMime,
       size: finalSize,
-      disk: 'local',
+      disk: "local",
       alt: alt || f.originalname,
       entity_type,
       entity_id: entity_id ? String(entity_id) : null,
@@ -99,7 +117,7 @@ exports.upload = catchAsync(async (req, res, next) => {
   }
 
   res.status(201).json({
-    status: 'success',
+    status: "success",
     results: records.length,
     data: {
       files: records,
@@ -118,13 +136,13 @@ exports.list = catchAsync(async (req, res) => {
 
   const { count, rows } = await File.findAndCountAll({
     where,
-    order: [['created_at', 'DESC']],
+    order: [["created_at", "DESC"]],
     limit: parseInt(limit),
     offset: (parseInt(page) - 1) * parseInt(limit),
   });
 
   res.json({
-    status: 'success',
+    status: "success",
     total: count,
     page: parseInt(page),
     data: { files: rows },
@@ -134,21 +152,21 @@ exports.list = catchAsync(async (req, res) => {
 /** Get single file meta */
 exports.getOne = catchAsync(async (req, res, next) => {
   const file = await File.findByPk(req.params.id);
-  if (!file) return next(new AppError('File not found', 404));
-  res.json({ status: 'success', data: { file } });
+  if (!file) return next(new AppError("File not found", 404));
+  res.json({ status: "success", data: { file } });
 });
 
 /** Delete file from DB + disk */
 exports.remove = catchAsync(async (req, res, next) => {
   const file = await File.findByPk(req.params.id);
-  if (!file) return next(new AppError('File not found', 404));
+  if (!file) return next(new AppError("File not found", 404));
 
   // Delete from disk if local
-  if (file.disk === 'local' && file.path && fs.existsSync(file.path)) {
+  if (file.disk === "local" && file.path && fs.existsSync(file.path)) {
     try {
       fs.unlinkSync(file.path);
     } catch (e) {
-      console.error('Failed to delete file from disk:', e.message);
+      console.error("Failed to delete file from disk:", e.message);
     }
   }
 
@@ -160,12 +178,14 @@ exports.remove = catchAsync(async (req, res, next) => {
 exports.attach = catchAsync(async (req, res, next) => {
   const { entity_type, entity_id, is_primary } = req.body;
   const file = await File.findByPk(req.params.id);
-  if (!file) return next(new AppError('File not found', 404));
+  if (!file) return next(new AppError("File not found", 404));
 
   if (is_primary && entity_type && entity_id) {
     await File.update(
       { is_primary: false },
-      { where: { entity_type, entity_id: String(entity_id), is_primary: true } }
+      {
+        where: { entity_type, entity_id: String(entity_id), is_primary: true },
+      },
     );
   }
 
@@ -174,22 +194,23 @@ exports.attach = catchAsync(async (req, res, next) => {
   if (is_primary !== undefined) file.is_primary = !!is_primary;
   await file.save();
 
-  res.json({ status: 'success', data: { file } });
+  res.json({ status: "success", data: { file } });
 });
 
 /** Bulk delete */
 exports.bulkDelete = catchAsync(async (req, res) => {
   const { ids } = req.body;
-  if (!ids?.length) return res.json({ status: 'success', message: 'Nothing to delete' });
+  if (!ids?.length)
+    return res.json({ status: "success", message: "Nothing to delete" });
 
   const files = await File.findAll({ where: { id: { [Op.in]: ids } } });
   for (const file of files) {
-    if (file.disk === 'local' && file.path && fs.existsSync(file.path)) {
+    if (file.disk === "local" && file.path && fs.existsSync(file.path)) {
       try {
         fs.unlinkSync(file.path);
       } catch (e) {}
     }
   }
   await File.destroy({ where: { id: { [Op.in]: ids } } });
-  res.json({ status: 'success', message: `Deleted ${files.length} files` });
+  res.json({ status: "success", message: `Deleted ${files.length} files` });
 });
