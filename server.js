@@ -40,6 +40,7 @@ app.use(morgan("dev"));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+app.set("trust proxy", 1);
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use(
