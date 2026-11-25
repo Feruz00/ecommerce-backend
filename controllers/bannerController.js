@@ -4,27 +4,8 @@ const { Banner, File } = require("../models");
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
 
-const getLanguage = (req) => {
-  const header = req.headers["accept-language"] || "en";
-  const language = header.slice(0, 2).toLowerCase();
-
-  return ["en", "tm", "ru"].includes(language) ? language : "en";
-};
-
-const getTranslation = (translations, language) => {
-  return (
-    translations?.[language] ||
-    translations?.en ||
-    translations?.ru ||
-    translations?.tm ||
-    {}
-  );
-};
-
 const mapBanner = (banner, language = "en") => {
   const item = banner.toJSON ? banner.toJSON() : { ...banner };
-
-  const translated = getTranslation(item.translations, language);
 
   return {
     id: item.id,
@@ -33,9 +14,6 @@ const mapBanner = (banner, language = "en") => {
     link: item.link,
     is_active: item.is_active,
     sort_order: item.sort_order,
-    translations: item.translations || {},
-    title: translated.title || "",
-    text: translated.text || "",
   };
 };
 
@@ -48,30 +26,7 @@ const bannerIncludes = [
   },
 ];
 
-const validateTranslations = (translations) => {
-  if (
-    translations !== undefined &&
-    (typeof translations !== "object" ||
-      translations === null ||
-      Array.isArray(translations))
-  ) {
-    throw new AppError("Invalid banner translations", 400);
-  }
-
-  if (translations) {
-    for (const language of ["en", "tm", "ru"]) {
-      const item = translations[language];
-
-      if (item !== undefined && (typeof item !== "object" || item === null)) {
-        throw new AppError(`Invalid ${language} translation`, 400);
-      }
-    }
-  }
-};
-
 exports.getActive = catchAsync(async (req, res) => {
-  const language = getLanguage(req);
-
   const banners = await Banner.findAll({
     where: { is_active: true },
     include: bannerIncludes,
@@ -84,13 +39,13 @@ exports.getActive = catchAsync(async (req, res) => {
   res.json({
     status: "success",
     data: {
-      banners: banners.map((banner) => mapBanner(banner, language)),
+      banners: banners.map((banner) => mapBanner(banner)),
     },
   });
 });
 
 exports.getAll = catchAsync(async (req, res) => {
-  const language = getLanguage(req);
+  // const language = getLanguage(req);
 
   const banners = await Banner.findAll({
     include: bannerIncludes,
@@ -103,22 +58,21 @@ exports.getAll = catchAsync(async (req, res) => {
   res.json({
     status: "success",
     data: {
-      banners: banners.map((banner) => mapBanner(banner, language)),
+      banners: banners.map((banner) => mapBanner(banner)),
     },
   });
 });
 
 exports.create = catchAsync(async (req, res) => {
-  const { image_file_id, link, is_active, sort_order, translations } = req.body;
+  const { image_file_id, link, is_active, sort_order } = req.body;
 
-  validateTranslations(translations);
+  // validateTranslations(translations);
 
   const banner = await Banner.create({
     image_file_id: image_file_id || null,
     link: link?.trim() || null,
     is_active: is_active ?? true,
     sort_order: sort_order ?? 0,
-    translations: translations || {},
   });
 
   const created = await Banner.findByPk(banner.id, {
@@ -128,7 +82,7 @@ exports.create = catchAsync(async (req, res) => {
   res.status(201).json({
     status: "success",
     data: {
-      banner: mapBanner(created, getLanguage(req)),
+      banner: mapBanner(created),
     },
   });
 });
@@ -140,9 +94,9 @@ exports.update = catchAsync(async (req, res) => {
     throw new AppError("Banner not found", 404);
   }
 
-  const { image_file_id, link, is_active, sort_order, translations } = req.body;
+  const { image_file_id, link, is_active, sort_order } = req.body;
 
-  validateTranslations(translations);
+  // validateTranslations(translations);
 
   const updates = {};
 
@@ -162,10 +116,6 @@ exports.update = catchAsync(async (req, res) => {
     updates.sort_order = sort_order;
   }
 
-  if (translations !== undefined) {
-    updates.translations = translations;
-  }
-
   await banner.update(updates);
 
   const updated = await Banner.findByPk(banner.id, {
@@ -175,7 +125,7 @@ exports.update = catchAsync(async (req, res) => {
   res.json({
     status: "success",
     data: {
-      banner: mapBanner(updated, getLanguage(req)),
+      banner: mapBanner(updated),
     },
   });
 });
