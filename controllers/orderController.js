@@ -20,7 +20,7 @@ const AppError = require("../utils/appError");
 const catchAsync = require("../utils/catchAsync");
 const { v4: uuidv4 } = require("uuid");
 const { getIO } = require("../socket");
-
+const ORDER_STATUSES = ["confirmed", "processing", "delivered", "cancelled"];
 const genNo = () => {
   const d = new Date();
   return `ORD${d.getFullYear().toString().slice(-2)}${String(
@@ -479,21 +479,12 @@ exports.myOrders = catchAsync(async (req, res, next) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
 
-  const allowedStatuses = [
-    "pending",
-    "confirmed",
-    "processing",
-    "shipped",
-    "delivered",
-    "cancelled",
-  ];
-
   const where = {
     user_id: req.user.id,
   };
 
   if (req.query.status && req.query.status !== "all") {
-    if (!allowedStatuses.includes(req.query.status)) {
+    if (!ORDER_STATUSES.includes(req.query.status)) {
       return next(new AppError("Invalid order status", 400));
     }
 
@@ -526,11 +517,19 @@ exports.myOrders = catchAsync(async (req, res, next) => {
   });
 });
 
-exports.getAll = catchAsync(async (req, res) => {
+exports.getAll = catchAsync(async (req, res, next) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
 
-  const where = req.query.status ? { status: req.query.status } : {};
+  const where = {};
+
+  if (req.query.status && req.query.status !== "all") {
+    if (!ORDER_STATUSES.includes(req.query.status)) {
+      return next(new AppError("Invalid order status", 400));
+    }
+
+    where.status = req.query.status;
+  }
 
   const { count, rows } = await Order.findAndCountAll({
     where,
@@ -539,14 +538,7 @@ exports.getAll = catchAsync(async (req, res) => {
       {
         model: User,
         as: "user",
-        attributes: [
-          "id",
-          "first_name",
-          "last_name",
-          "username",
-          "username",
-          "phone",
-        ],
+        attributes: ["id", "first_name", "last_name", "username", "phone"],
       },
       {
         model: OrderItem,
@@ -606,43 +598,78 @@ exports.getOne = catchAsync(async (req, res, next) => {
 });
 
 exports.updateStatus = catchAsync(async (req, res, next) => {
-  const allowedStatuses = [
-    "pending",
-    "confirmed",
-    "processing",
-    "shipped",
-    "delivered",
-    "cancelled",
-  ];
+  const { status } = req.body;
 
-  const { status, note } = req.body;
+  const ORDER_STATUSES = ["processing", "confirmed", "delivered", "cancelled"];
 
-  if (status === undefined && note === undefined) {
-    return next(new AppError("Nothing to update", 400));
-  }
-
-  if (status !== undefined && !allowedStatuses.includes(status)) {
+  if (!ORDER_STATUSES.includes(status)) {
     return next(new AppError("Invalid order status", 400));
   }
 
-  const order = await Order.findByPk(req.params.id);
+  const transaction = await sequelize.transaction();
 
-  if (!order) {
-    return next(new AppError("Order not found", 404));
-  }
+  try {
+    const order = await Order.findByPk(req.params.id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
 
-  if (status !== undefined) {
+    if (!order) {
+      await transaction.rollback();
+      return next(new AppError("Order not found", 404));
+    }
+
+    // Delivered and cancelled orders are final.
+    if (["delivered", "cancelled"].includes(order.status)) {
+      await transaction.rollback();
+
+      return next(
+        new AppError(
+          `Cannot update an order with status "${order.status}"`,
+          400,
+        ),
+      );
+    }
+
+    // Prevent unnecessary updates.
+    if (order.status === status) {
+      await transaction.rollback();
+
+      return next(new AppError("Order already has this status", 400));
+    }
+
     order.status = status;
+    await order.save({ transaction });
+
+    // Delivered means payment was successfully received.
+    if (status === "delivered") {
+      await Payment.update(
+        {
+          status: "completed",
+          paid_at: new Date(),
+        },
+        {
+          where: {
+            order_id: order.id,
+            status: "pending",
+          },
+          transaction,
+        },
+      );
+    }
+
+    await transaction.commit();
+
+    res.status(200).json({
+      status: "success",
+      message: "Order status updated successfully",
+      data: { order },
+    });
+  } catch (error) {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+
+    throw error;
   }
-
-  if (note !== undefined) {
-    order.note = note;
-  }
-
-  await order.save();
-
-  res.json({
-    status: "success",
-    data: { order },
-  });
 });

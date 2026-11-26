@@ -4,25 +4,24 @@ const { Order, OrderItem, Payment } = require("../models");
 const AppError = require("../utils/appError");
 const catchAsync = require("../utils/catchAsync");
 
-const ORDER_STATUSES = [
-  "pending",
-  "confirmed",
-  "processing",
-  "shipped",
-  "delivered",
-  "cancelled",
-];
+const ORDER_STATUSES = ["confirmed", "processing", "delivered", "cancelled"];
 
 // GET /api/my-orders
 exports.getMyOrders = catchAsync(async (req, res) => {
   const userId = req.user.id;
 
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(
+    50,
+    Math.max(1, Number.parseInt(req.query.limit, 10) || 10),
+  );
 
-  const where = { user_id: userId };
+  const where = {
+    user_id: userId,
+  };
 
-  if (req.query.status) {
+  // Filter by status unless status is "all".
+  if (req.query.status && req.query.status !== "all") {
     if (!ORDER_STATUSES.includes(req.query.status)) {
       throw new AppError("Invalid order status", 400);
     }

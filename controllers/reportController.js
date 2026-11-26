@@ -3,8 +3,15 @@
 const { Op, fn, col, literal } = require("sequelize");
 const ExcelJS = require("exceljs");
 
-const { Order, OrderItem, Product, User } = require("../models");
+const { Order, OrderItem, Product, User, Payment } = require("../models");
+
 const catchAsync = require("../utils/catchAsync");
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+
+const ORDER_STATUSES = ["confirmed", "processing", "delivered", "cancelled"];
 
 // ============================================================
 // HELPERS
@@ -42,10 +49,16 @@ const parseDate = (value, endOfDay = false) => {
 const getProductName = (product, locale = "en") => {
   if (!product) return "—";
 
-  const translations =
-    typeof product.translations === "string"
-      ? JSON.parse(product.translations || "{}")
-      : product.translations || {};
+  let translations = {};
+
+  try {
+    translations =
+      typeof product.translations === "string"
+        ? JSON.parse(product.translations || "{}")
+        : product.translations || {};
+  } catch {
+    translations = {};
+  }
 
   return (
     translations?.[locale]?.name ||
@@ -58,7 +71,7 @@ const getProductName = (product, locale = "en") => {
   );
 };
 
-// Prefer the order item snapshot to preserve historical product names.
+// Prefer order item snapshot for historical product names.
 const getOrderItemName = (item, locale = "en") => {
   return (
     item.product_name ||
@@ -95,6 +108,10 @@ const getSelectedAttributes = (value) => {
   return JSON.stringify(value);
 };
 
+const getItemsCount = (items = []) => {
+  return items.reduce((sum, item) => sum + toNumber(item.quantity), 0);
+};
+
 /**
  * Build common order filters.
  */
@@ -112,6 +129,12 @@ function buildOrderWhere(query) {
   }
 
   if (query.status) {
+    if (!ORDER_STATUSES.includes(query.status)) {
+      const error = new Error("Invalid order status");
+      error.statusCode = 400;
+      throw error;
+    }
+
     where.status = query.status;
   }
 
@@ -123,25 +146,70 @@ function buildOrderWhere(query) {
 }
 
 /**
- * Exclude cancelled orders without overwriting selected filters.
- *
- * For example:
- * status=delivered
- * becomes:
- * status=delivered AND status!=cancelled
+ * Revenue is recognized only for delivered orders.
  */
 function getRevenueWhere(where) {
   return {
     [Op.and]: [
       where,
       {
-        status: {
-          [Op.ne]: "cancelled",
-        },
+        status: "delivered",
       },
     ],
   };
 }
+
+const escapeCsv = (value) => {
+  if (value == null) return "";
+
+  let s = String(value);
+
+  // Prevent spreadsheet formula injection.
+  if (/^[=+\-@]/.test(s)) {
+    s = `'${s}`;
+  }
+
+  if (/[",\n\r]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+
+  return s;
+};
+
+/**
+ * Format payment records for reports.
+ *
+ * Assumes Payment has status and amount fields.
+ */
+const getPaymentSummary = (payments = []) => {
+  if (!payments.length) {
+    return {
+      payment_status: "unpaid",
+      paid_amount: 0,
+      payments_count: 0,
+    };
+  }
+
+  const paidPayments = payments.filter((payment) => payment.status === "paid");
+
+  const paidAmount = paidPayments.reduce(
+    (sum, payment) => sum + toNumber(payment.amount),
+    0,
+  );
+
+  const paymentStatus =
+    paidPayments.length > 0
+      ? "paid"
+      : payments.some((payment) => payment.status === "pending")
+        ? "pending"
+        : payments[0].status || "unpaid";
+
+  return {
+    payment_status: paymentStatus,
+    paid_amount: paidAmount,
+    payments_count: payments.length,
+  };
+};
 
 // ============================================================
 // GET /api/reports/summary
@@ -153,10 +221,12 @@ exports.getSummary = catchAsync(async (req, res) => {
 
   const [totalOrders, revenueResult, statusGroups, paymentGroups, itemsResult] =
     await Promise.all([
+      // All matching orders.
       Order.count({
         where,
       }),
 
+      // Revenue from delivered orders only.
       Order.findOne({
         where: revenueWhere,
         attributes: [
@@ -172,6 +242,7 @@ exports.getSummary = catchAsync(async (req, res) => {
         raw: true,
       }),
 
+      // Order counts by status.
       Order.findAll({
         where,
         attributes: ["status", [fn("COUNT", col("Order.id")), "count"]],
@@ -179,8 +250,23 @@ exports.getSummary = catchAsync(async (req, res) => {
         raw: true,
       }),
 
-      // Group orders by payment status.
+      // Payment counts by status.
+      Payment.findAll({
+        attributes: ["status", [fn("COUNT", col("Payment.id")), "count"]],
+        include: [
+          {
+            model: Order,
+            as: "order",
+            attributes: [],
+            where,
+            required: true,
+          },
+        ],
+        group: ["Payment.status"],
+        raw: true,
+      }),
 
+      // Items sold from delivered orders only.
       OrderItem.findOne({
         attributes: [
           [
@@ -204,12 +290,22 @@ exports.getSummary = catchAsync(async (req, res) => {
         raw: true,
       }),
     ]);
+
   const byStatus = {};
+
+  ORDER_STATUSES.forEach((status) => {
+    byStatus[status] = 0;
+  });
+
   statusGroups.forEach((row) => {
     byStatus[row.status] = toNumber(row.count);
   });
 
   const byPayment = {};
+
+  paymentGroups.forEach((row) => {
+    byPayment[row.status] = toNumber(row.count);
+  });
 
   res.json({
     status: "success",
@@ -266,6 +362,11 @@ exports.getOrders = catchAsync(async (req, res) => {
           "selected_attributes",
         ],
       },
+      {
+        model: Payment,
+        as: "payments",
+        required: false,
+      },
     ],
 
     order: [["created_at", "DESC"]],
@@ -277,11 +378,13 @@ exports.getOrders = catchAsync(async (req, res) => {
     const o = order.toJSON();
 
     o.customer_name = getCustomerName(o.user, o.shipping_address);
+    o.items_count = getItemsCount(o.items);
 
-    o.items_count = (o.items || []).reduce(
-      (sum, item) => sum + toNumber(item.quantity),
-      0,
-    );
+    const paymentSummary = getPaymentSummary(o.payments);
+
+    o.payment_status = paymentSummary.payment_status;
+    o.paid_amount = paymentSummary.paid_amount;
+    o.payments_count = paymentSummary.payments_count;
 
     return o;
   });
@@ -366,7 +469,7 @@ exports.getTopProducts = catchAsync(async (req, res) => {
 exports.getDaily = catchAsync(async (req, res) => {
   const baseWhere = buildOrderWhere(req.query);
 
-  // Default: last 30 days, only when no date filter is supplied.
+  // Default: last 30 days.
   if (!baseWhere.created_at) {
     const end = new Date();
     end.setHours(23, 59, 59, 999);
@@ -442,28 +545,16 @@ exports.exportOrders = catchAsync(async (req, res) => {
           "selected_attributes",
         ],
       },
+      {
+        model: Payment,
+        as: "payments",
+        required: false,
+      },
     ],
 
     order: [["created_at", "DESC"]],
     limit: maxRows,
   });
-
-  const escapeCsv = (value) => {
-    if (value == null) return "";
-
-    let s = String(value);
-
-    // Prevent spreadsheet formula injection.
-    if (/^[=+\-@]/.test(s)) {
-      s = `'${s}`;
-    }
-
-    if (/[",\n\r]/.test(s)) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-
-    return s;
-  };
 
   const headers = [
     "Order Number",
@@ -472,6 +563,7 @@ exports.exportOrders = catchAsync(async (req, res) => {
     "Phone",
     "Status",
     "Payment Status",
+    "Paid Amount",
     "Payment Method",
     "Items",
     "Subtotal",
@@ -489,13 +581,10 @@ exports.exportOrders = catchAsync(async (req, res) => {
 
     const customer = getCustomerName(o.user, o.shipping_address);
     const phone = getCustomerPhone(o.user, o.shipping_address);
-
-    const itemsCount = (o.items || []).reduce(
-      (sum, item) => sum + toNumber(item.quantity),
-      0,
-    );
-
+    const itemsCount = getItemsCount(o.items);
     const city = o.shipping_address?.city || "";
+
+    const paymentSummary = getPaymentSummary(o.payments);
 
     lines.push(
       [
@@ -504,7 +593,9 @@ exports.exportOrders = catchAsync(async (req, res) => {
         customer,
         phone,
         o.status,
-        o.payment_method,
+        paymentSummary.payment_status,
+        paymentSummary.paid_amount,
+        o.payment_method || "",
         itemsCount,
         o.subtotal,
         o.shipping_cost,
@@ -518,7 +609,6 @@ exports.exportOrders = catchAsync(async (req, res) => {
     );
   }
 
-  // UTF-8 BOM for Excel (Turkmen / Russian support).
   const csv = "\uFEFF" + lines.join("\r\n");
 
   const filename = `orders-report-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -572,6 +662,11 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
           },
         ],
       },
+      {
+        model: Payment,
+        as: "payments",
+        required: false,
+      },
     ],
 
     order: [["created_at", "DESC"]],
@@ -611,6 +706,8 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
     { header: "Discount", key: "discount", width: 16 },
     { header: "Order Total", key: "total", width: 16 },
     { header: "Status", key: "status", width: 18 },
+    { header: "Payment Status", key: "paymentStatus", width: 18 },
+    { header: "Paid Amount", key: "paidAmount", width: 16 },
     { header: "Payment Method", key: "paymentMethod", width: 20 },
     { header: "City", key: "city", width: 20 },
     { header: "Note", key: "note", width: 35 },
@@ -620,6 +717,7 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
     const o = order.toJSON();
 
     const items = o.items || [];
+    const paymentSummary = getPaymentSummary(o.payments);
 
     const customer = getCustomerName(o.user, o.shipping_address);
     const phone = getCustomerPhone(o.user, o.shipping_address);
@@ -635,12 +733,13 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
       discount: toNumber(o.discount),
       total: toNumber(o.total),
       status: o.status || "",
+      paymentStatus: paymentSummary.payment_status,
+      paidAmount: paymentSummary.paid_amount,
       paymentMethod: o.payment_method || "",
       city: o.shipping_address?.city || "",
       note: o.note || "",
     };
 
-    // Keep orders even when they do not have any items.
     if (!items.length) {
       worksheet.addRow({
         ...commonOrderData,
@@ -651,7 +750,6 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
 
     items.forEach((item, index) => {
       const row = {
-        // Order information appears only on the first item row.
         ...(index === 0 ? commonOrderData : {}),
 
         product: getOrderItemName(item, locale),
@@ -661,7 +759,6 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
         price: toNumber(item.price),
         itemTotal: toNumber(item.total),
 
-        // Avoid repeating order totals for every product row.
         subtotal: index === 0 ? commonOrderData.subtotal : null,
         shipping: index === 0 ? commonOrderData.shipping : null,
         discount: index === 0 ? commonOrderData.discount : null,
@@ -708,7 +805,7 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
   });
 
   // ----------------------------------------------------------
-  // DATA STYLE AND FORMATTING
+  // DATA STYLE
   // ----------------------------------------------------------
 
   worksheet.eachRow((row, rowNumber) => {
@@ -720,19 +817,22 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
       vertical: "middle",
     };
 
-    // Date.
     row.getCell("date").numFmt = "yyyy-mm-dd hh:mm";
 
-    // Numeric values.
-    ["price", "itemTotal", "subtotal", "shipping", "discount", "total"].forEach(
-      (key) => {
-        row.getCell(key).numFmt = '#,##0.00 "TMT"';
-      },
-    );
+    [
+      "price",
+      "itemTotal",
+      "subtotal",
+      "shipping",
+      "discount",
+      "total",
+      "paidAmount",
+    ].forEach((key) => {
+      row.getCell(key).numFmt = '#,##0.00 "TMT"';
+    });
 
     row.getCell("quantity").numFmt = "#,##0";
 
-    // Alternating row background.
     if (rowNumber % 2 === 0) {
       row.eachCell((cell) => {
         cell.fill = {
@@ -743,19 +843,16 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
       });
     }
 
-    // Highlight order number.
     row.getCell("orderNumber").font = {
       bold: true,
       color: { argb: "FF312E81" },
     };
 
-    // Highlight order total.
     row.getCell("total").font = {
       bold: true,
       color: { argb: "FF047857" },
     };
 
-    // Wrap product attributes and notes.
     row.getCell("variant").alignment = {
       vertical: "middle",
       wrapText: true,
@@ -768,13 +865,13 @@ exports.exportOrdersExcel = catchAsync(async (req, res) => {
   });
 
   // ----------------------------------------------------------
-  // FILTER AND FOOTER
+  // FILTER
   // ----------------------------------------------------------
 
   if (worksheet.rowCount > 1) {
     worksheet.autoFilter = {
       from: "A1",
-      to: "T1",
+      to: "U1",
     };
   }
 

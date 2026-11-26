@@ -25,15 +25,13 @@ module.exports = (sequelize, DataTypes) => {
       user_id: { type: DataTypes.UUID, allowNull: false },
       status: {
         type: DataTypes.ENUM(
-          "pending",
           "confirmed",
           "processing",
-          "shipped",
           "delivered",
           "cancelled",
         ),
         allowNull: false,
-        defaultValue: "pending",
+        defaultValue: "processing",
       },
       // payment_status: {
       //   type: DataTypes.ENUM('pending', 'paid', 'failed', 'refunded'),
